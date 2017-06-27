@@ -23,8 +23,8 @@ using namespace std;
 std_msgs::Empty order;
 geometry_msgs::Twist cmd;
 
-const float vel_kp=0.00,vel_ki=0.00,vel_kd=0.00;
-const float pos_kp=0.00,pos_ki=0.00,pos_kd=0.00;
+const float vel_kp=0.12,vel_ki=0.003,vel_kd=0.008;
+const float pos_kp=0.0022,pos_ki=0.00,pos_kd=0.00;
 #define LOOP_RATE 10
 
 struct raw_state
@@ -119,7 +119,7 @@ int main(int argc, char **argv)
     ros::Subscriber sub = n.subscribe("/ardrone/odometry",1,odometryCallback);
    ros::Subscriber nav_sub = n.subscribe("/ardrone/navdata", 1, navCallback);
     ros::Rate loop_rate(LOOP_RATE);
-    int index = 0;
+    int index = 0;static bool new_start=true;
 
     raw_stat.pos_b = Vector3f::Zero();
     raw_stat.pos_f = Vector3f::Zero();
@@ -133,7 +133,7 @@ int main(int argc, char **argv)
     while(ros::ok())
     {
         index = index+1;
-	ROS_INFO("index:%d",index);
+	//ROS_INFO("index:%d",index);
 	/*if (index<=50)
         {
             raw_stat.vel_f(0) = index/1000.0;
@@ -154,12 +154,26 @@ int main(int argc, char **argv)
 	ROS_INFO("vset:%f",raw_stat.vel_f(0));
         //raw_stat.pos_f(0) = raw_stat.pos_f(0)  * 10;
 	*/
-	
+	if(new_start)
+	{
+	  if(raw_stat.pos_b(0)!=0)
+	{
+          raw_stat.pos_f = raw_stat.pos_b;
+          new_start = false;
+          pid_pos(raw_stat.pos_b,raw_stat.pos_f,contro.pos_sp);
+          out.vel_sp = raw_stat.vel_f+contro.pos_sp;
+          pid_vel(raw_stat.vel_b,out.vel_sp,contro.vel_sp);
+    }
+    }
+    else
+    {
         pid_pos(raw_stat.pos_b,raw_stat.pos_f,contro.pos_sp);
-	//ROS_INFO("px_act:%f,py_act:%f,px_set:%f,py_set:%f",raw_stat.pos_b(0),raw_stat.pos_b(1),raw_stat.pos_f(0),raw_stat.pos_f(1));
-	ROS_INFO("posafter_pid:x%fy%f",contro.pos_sp(0),contro.pos_sp(1));
-        //out.vel_sp = raw_stat.vel_f+contro.pos_sp;
+        out.vel_sp = raw_stat.vel_f+contro.pos_sp;
         pid_vel(raw_stat.vel_b,out.vel_sp,contro.vel_sp);
+    }
+
+	//ROS_INFO("px_act:%f,py_act:%f,px_set:%f,py_set:%f",raw_stat.pos_b(0),raw_stat.pos_b(1),raw_stat.pos_f(0),raw_stat.pos_f(1));
+    //ROS_INFO("posafter_pid:x%fy%f",contro.pos_sp(0),contro.pos_sp(1));
 	//ROS_INFO("Vel,act,x:%f,y:%f,set,x:%f,y:%f",raw_stat.vel_b(0),raw_stat.vel_b(1),out.vel_sp(0),out.vel_sp(1));
 	//ROS_INFO("finalvel,x:%f,y:%f",contro.vel_sp(0),contro.vel_sp(1));
         
