@@ -3,12 +3,13 @@
 #include "nav_msgs/Odometry.h"
 #include "std_msgs/Empty.h"
 #include "std_msgs/Float32.h"
-#include "std_msgs/Bool.h"
+#include "std_msgs/Int8.h"
 #include "geometry_msgs/Point.h"
 #include <iostream>
 #include <fstream>
 
 #include "ardrone_autonomy/Navdata.h"
+#include "position_estimate/renew.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -26,14 +27,13 @@ using namespace std;
 
 std_msgs::Empty order;
 geometry_msgs::Twist cmd;
-std_msgs::Bool is_renew;
-
-const float pos_kp=0.2,pos_ki=0.0/*0.03*/,pos_kd=0.0/*0.01*/,yaw_kp=0.1;
+int current_index;
+const float pos_kp=0.2,pos_ki=0.0/*0.03*/,pos_kd=0.0/*0.01*/,yaw_kp=0.5;
 #define LOOP_RATE 10
 #define row_num 292
 #define col_num 4
 #define key_point_num 3
-#define measured_pos "/home/cc/catkin_ws/src/project-1-of-comptetition/src/setpoint.csv"
+#define measured_pos "/home/wade/catkin_ws/src/project-1-of-comptetition/src/setpoint.csv"
 
 struct raw_state
 {
@@ -84,10 +84,10 @@ void yawCallback(const std_msgs::Float32 &msg)
 {
     static bool first=true;
     static float yaw_ini;
-    if (first)
-    {
-        yaw_ini = msg.data;
-        first = false;
+    
+    if(first)
+    {  yaw_ini = msg.data;
+       first = false;
     }
 
     yaw_contro.yaw_actual = msg.data - yaw_ini;
@@ -121,9 +121,11 @@ bool read_csv(char *filepath, MatrixXf &setpoint)
 
     return true;
 }
-void Is_SuccessCallback(const std_msgs::Empty &msg)
+void Is_RenewCallback(const position_estimate::renew &msg)
 {
-    variate = true;
+    variate = msg.isRenew;
+    if (variate)
+        current_index = msg.index;
 }
 
 void pid_pos(Vector3f& actual,Vector3f& set,Vector3f& control)
@@ -157,12 +159,12 @@ int main(int argc, char **argv)
     ros::init(argc, argv, "pos_control");
     ros::NodeHandle n;
     ros::Publisher cmd_pub = n.advertise<geometry_msgs::Twist>("/cmd_vel_ref", 1);
-    ros::Publisher bool_pub = n.advertise<std_msgs::Bool>("is_renew",1);
+    ros::Publisher index_pub = n.advertise<std_msgs::Int8>("index",1);
     ros::Publisher takeoff_pub = n.advertise<std_msgs::Empty>("/ardrone/takeoff", 1);
     ros::Publisher land_pub = n.advertise<std_msgs::Empty>("/ardrone/land", 1);
     ros::Subscriber odo_sub = n.subscribe("/ardrone_position",1,odometryCallback);
-    ros::Subscriber flag_sub = n.subscribe("is_success",1,Is_SuccessCallback);
-    ros::Subscriber yaw_sub = n.subscribe("/actual_yaw",1,yawCallback);
+    ros::Subscriber flag_sub = n.subscribe("is_renew",1,Is_RenewCallback);
+    ros::Subscriber yaw_sub = n.subscribe("/ardrone/yaw",1,yawCallback);
     ros::Rate loop_rate(LOOP_RATE);
 
     raw_stat.pos_b = Vector3f::Zero();
@@ -177,37 +179,33 @@ int main(int argc, char **argv)
     MatrixXf setpoint(row_num,col_num);
     Vector3d key_index(98,194,292);
     read_csv(measured_pos,setpoint);
-    bool Is_empty = true;
+    current_index = 0;
 
-    int index = 0;
     while(ros::ok())
     {
-        ROS_INFO("index:%d",index);
+        ROS_INFO("index:%d",current_index);
         ROS_INFO("vset:x=%f y=%f",raw_stat.vel_f(0),raw_stat.vel_f(1));
         ROS_INFO("pset:x=%f y=%f",raw_stat.pos_f(0),raw_stat.pos_f(1));
 
-        if(variate==true)
+        if(!variate)
         {
-            index++;
-            is_renew.data = true;
-            Is_empty = true;
+            raw_stat.pos_f(0) = setpoint(current_index,2);
+            raw_stat.pos_f(1) = setpoint(current_index,3);
+            raw_stat.vel_f(0) = setpoint(current_index,0);
+            raw_stat.vel_f(1) = setpoint(current_index,1);
+            current_index++;
+            std_msgs::Int8 tmp;
+            tmp.data = current_index;
+            index_pub.publish(tmp);
         }
 
         for(int i=0;i<key_point_num;i++)
         {
-            if(key_index(i)==index)
-                Is_empty = false;
-        }
-        if (!Is_empty)//keypoints
-        {
-            variate = false;
-            is_renew.data = false;
+            if(key_index(i)==current_index)
+                variate = true;
         }
 
-        raw_stat.pos_f(0) = setpoint(index,2);
-        raw_stat.pos_f(1) = setpoint(index,3);
-        raw_stat.vel_f(0) = setpoint(index,0);
-        raw_stat.vel_f(1) = setpoint(index,1);
+
         pid_pos(raw_stat.pos_b,raw_stat.pos_f,contro.pos_sp);
         out.vel_sp = raw_stat.vel_f+contro.pos_sp;
         pid_yaw(yaw_contro.yaw_actual,yaw_contro.yaw_set,out_yaw);
@@ -220,13 +218,12 @@ int main(int argc, char **argv)
         cmd.linear.z = 0.0;
         cmd.angular.x = 0.0;
         cmd.angular.y = 0.0;
-        cmd.angular.z = out_yaw;
+        cmd.angular.z = -out_yaw;
 
         cmd_pub.publish(cmd);
-        bool_pub.publish(is_renew);
         ros::spinOnce();
         loop_rate.sleep();
-        if (index>=row_num)
+        if (current_index>=row_num)
             break;
     }
     return 0;
