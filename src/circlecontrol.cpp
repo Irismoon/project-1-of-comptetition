@@ -2,6 +2,8 @@
 #include "geometry_msgs/Twist.h"
 #include "nav_msgs/Odometry.h"
 #include "std_msgs/Empty.h"
+#include "std_msgs/Float32.h"
+#include "geometry_msgs/Point.h"
 #include <iostream>
 
 #include "ardrone_autonomy/Navdata.h"
@@ -22,9 +24,11 @@ using namespace std;
 
 std_msgs::Empty order;
 geometry_msgs::Twist cmd;
+//geometry_msgs::Twist odo_set; for test
 
-const float vel_kp=0.12,vel_ki=0.003,vel_kd=0.008;
-const float pos_kp=0.0022,pos_ki=0.00,pos_kd=0.00;
+
+//const float vel_kp=0.12,vel_ki=0.003,vel_kd=0.008;
+const float pos_kp=0.2,pos_ki=0.0/*0.03*/,pos_kd=0.0/*0.01*/,yaw_kp=0.5;//137100
 #define LOOP_RATE 10
 
 struct raw_state
@@ -38,24 +42,57 @@ struct output
 {
     Vector3f vel_sp;
 };
+
 struct control
 {
     Vector3f vel_sp;
     Vector3f pos_sp;
 };
-
+struct yaw_control
+{
+    float yaw_set;
+    float yaw_actual;
+};
 raw_state raw_stat;
 output out;
 control contro;
+yaw_control yaw_contro;
+float out_yaw;
 
-void odometryCallback(const nav_msgs::Odometry &msg){
-    raw_stat.pos_b(0)= msg.pose.pose.position.x;//unit: m
-    raw_stat.pos_b(1)= msg.pose.pose.position.y;
-    raw_stat.vel_b(0)= msg.twist.twist.linear.x;//unit:m/s
-    raw_stat.vel_b(1)= msg.twist.twist.linear.y;
+bool record = true;
+float start_x=0.0;
+float start_y=0.0;
+
+void odometryCallback(const geometry_msgs::Point &msg){
+    raw_stat.pos_b(0)= msg.x;//unit: m ?????? what the hell?????
+    raw_stat.pos_b(1)= msg.y;
+
+    if(record)
+    {
+        start_x = raw_stat.pos_b(0);
+        start_y = raw_stat.pos_b(1);
+        record = false;
+    }
+
+    raw_stat.pos_b(0) = raw_stat.pos_b(0) - start_x;
+    raw_stat.pos_b(1) = raw_stat.pos_b(1) - start_y;
+
+    //raw_stat.vel_b(0)= msg.twist.twist.linear.x;//unit:m/s
+    //raw_stat.vel_b(1)= msg.twist.twist.linear.y;
 }
+void yawCallback(const std_msgs::Float32 &msg)
+{
+    static bool first=true;
+    static float yaw_ini;
+    if (first)
+    {
+        yaw_ini = msg.data;
+        first = false;
+    }
 
-void navCallback(const ardrone_autonomy::Navdata &msg)
+    yaw_contro.yaw_actual = msg.data - yaw_ini;
+}
+/*void navCallback(const ardrone_autonomy::Navdata &msg)
 {
     static bool start=true;
     static float last_time = 0;
@@ -69,7 +106,7 @@ void navCallback(const ardrone_autonomy::Navdata &msg)
 //    raw_stat.vel_b(0) = msg.vx/1000;
 //    raw_stat.vel_b(1) = msg.vy/1000;
 //    raw_stat.pos_b = raw_stat.vel_b * dt;
-}
+}*/
 
 void pid_pos(Vector3f& actual,Vector3f& set,Vector3f& control)
 {
@@ -90,7 +127,13 @@ void pid_pos(Vector3f& actual,Vector3f& set,Vector3f& control)
     err_last = err_pos;
     err_int += err_pos / LOOP_RATE;
 }
-void pid_vel(Vector3f& actual,Vector3f& set,Vector3f& control)
+void pid_yaw(float yaw_actual,float yaw_set,float &out_yaw)
+{
+
+    out_yaw = yaw_kp * (yaw_set - yaw_actual);
+
+}
+/*void pid_vel(Vector3f& actual,Vector3f& set,Vector3f& control)
 {
     static Vector3f err_lastt;
     static Vector3f err_intt;
@@ -108,18 +151,24 @@ void pid_vel(Vector3f& actual,Vector3f& set,Vector3f& control)
     control = err_vel * vel_kp + err_d * vel_kd + err_intt * vel_ki;
     err_lastt = err_vel;
     err_intt += err_vel / LOOP_RATE;
-}
+}*/
+
 int main(int argc, char **argv)
 {
     ros::init(argc, argv, "circlecontrol");
     ros::NodeHandle n;
-    ros::Publisher cmd_pub = n.advertise<geometry_msgs::Twist>("/cmd_vel", 1);
+    ros::Publisher cmd_pub = n.advertise<geometry_msgs::Twist>("/cmd_vel_ref", 1);
+    ros::Publisher odo_set_pub = n.advertise<geometry_msgs::Twist>("/odo_set", 1);
     ros::Publisher takeoff_pub = n.advertise<std_msgs::Empty>("/ardrone/takeoff", 1);
     ros::Publisher land_pub = n.advertise<std_msgs::Empty>("/ardrone/land", 1);
-    ros::Subscriber sub = n.subscribe("/ardrone/odometry",1,odometryCallback);
-   ros::Subscriber nav_sub = n.subscribe("/ardrone/navdata", 1, navCallback);
+    ros::Subscriber odo_sub = n.subscribe("/ardrone_position",1,odometryCallback);
+    ros::Subscriber yaw_sub = n.subscribe("/ardrone/yaw",1,yawCallback);
+   //ros::Subscriber nav_sub = n.subscribe("/ardrone/navdata", 1, navCallback);
     ros::Rate loop_rate(LOOP_RATE);
-    int index = 0;static bool new_start=true;
+
+
+
+    static bool new_start=true;
 
     raw_stat.pos_b = Vector3f::Zero();
     raw_stat.pos_f = Vector3f::Zero();
@@ -128,63 +177,164 @@ int main(int argc, char **argv)
     out.vel_sp = Vector3f::Zero();;
     contro.pos_sp = Vector3f::Zero();
     contro.vel_sp = Vector3f::Zero();
+    yaw_contro.yaw_actual = 0.0;
+    yaw_contro.yaw_set = 0.0;
 
-
+    int index = 0;
     while(ros::ok())
     {
+       /* float r=0.8;
+        float w=0.1;*/
+
         index = index+1;
-	//ROS_INFO("index:%d",index);
-	/*if (index<=50)
-        {
-            raw_stat.vel_f(0) = index/1000.0;
-            raw_stat.pos_f(0) = index/1000.0 * index /2/ LOOP_RATE;
-        }else if((index>300)&&(index<=500))
-        {
-            raw_stat.vel_f(0) = -0.001*index+1;
-            raw_stat.pos_f(0) = (600+800)*0.2/2/LOOP_RATE+ (-0.001*index+0.1+0.02)*(index-800)/2/LOOP_RATE;
-        }else if((index<=50)&&(index>0))
-        {
-            raw_stat.pos_f(0) = 200*0.02/2/LOOP_RATE+(index-200)*0.02/LOOP_RATE;
-        }else
-        {
-            raw_stat.vel_f(0) = 0.0;
-            raw_stat.pos_f(0) = (600+1000)*0.02/2/LOOP_RATE;
-        }
+        ROS_INFO("index:%d",index);
+            if (index<=50)
+            {
+                raw_stat.vel_f(0) = index/50.0*0.2;
+                raw_stat.pos_f(0) = index/50.0*0.2 * index /2.0/ LOOP_RATE;
+            }
+
+            /*if(index <= 624)
+            {
+                raw_stat.vel_f(0) = w*r*cos(w*index/LOOP_RATE);
+                raw_stat.vel_f(1) = w*r*sin(w*index/LOOP_RATE);
+                raw_stat.pos_f(0) = r*sin(w*index/LOOP_RATE);
+                raw_stat.pos_f(1) = r-r*cos(w*index/LOOP_RATE);
+            }
+            else if( index > 624)
+            {
+                raw_stat.vel_f(0) = 0;
+                raw_stat.vel_f(1) = 0;
+            }*/
+            else if(index > 50 && index <= 250)
+            {
+              raw_stat.vel_f(0) = 0.2;
+              raw_stat.pos_f(0) = 0.2 * index/LOOP_RATE;
+
+            }
+            else if(index > 250 && index < 300)
+            {
+                raw_stat.vel_f(0) = 0.2 - (index-100)/50.0*0.2;
+                raw_stat.pos_f(0) = 2.0 - (150-index)/50.0*0.2 * (150-index) /2.0/ LOOP_RATE;
+            }
+            else
+            {
+                raw_stat.vel_f(0) = 0.0;
+            }
+            /*else{
+                //raw_stat.vel_f(0) = 0.0;
+                //raw_stat.pos_f(0) = 2.0;
+                phase =1;
+            }
+            break;
+        case 1:
+            index2 ++;
+            if (index2<=50)
+                {
+                    raw_stat.vel_f(1) = index2/50.0*0.2;
+                    raw_stat.pos_f(1) = index2/50.0*0.2 * index2 /2.0/ LOOP_RATE;
+                }else if((index2>50)&&(index2<=100)){
+                raw_stat.vel_f(1) = 0.2;
+                    raw_stat.pos_f(1) = 0.5+0.2*(index2/LOOP_RATE-5.0);
+            }
+            else if(index2 > 100 && index2 < 150){
+                raw_stat.vel_f(1) = 0.2 - (index2-100)/50.0*0.2;
+                    raw_stat.pos_f(1) = 2.0 - (150-index2)/50.0*0.2 * (150-index2) /2.0/ LOOP_RATE;
+            }
+            else{
+                //raw_stat.vel_f(1) = 0.0;
+                 //   raw_stat.pos_f(1) = 2.0;
+                phase = 2;
+            }
+            break;
+
+        case 2:
+            index3++;
+            if (index3<=50)
+                {
+                    raw_stat.vel_f(1) = -index3/50.0*0.2;
+                    raw_stat.pos_f(1) = 2.0 - index3/50.0*0.2 * index3 /2.0/ LOOP_RATE;
+                }else if((index3>50)&&(index3<=100)){
+                raw_stat.vel_f(1) = -0.2;
+                    raw_stat.pos_f(1) = 2- (0.5+0.2*(index3/LOOP_RATE-5.0));
+            }
+            else if(index3 > 100 && index3 < 150){
+                raw_stat.vel_f(1) = -(0.2 - (index3-100)/50.0*0.2);
+                    raw_stat.pos_f(1) = (150-index3)/50.0*0.2 * (150-index2) /2.0/ LOOP_RATE;
+            }
+            else{
+                //raw_stat.vel_f(1) = 0.0;
+                  //  raw_stat.pos_f(1) = 0.0;
+                phase = 3;
+
+            }
+            break;
+        case 3:
+            index4++;
+            if (index4<=50)
+                {
+                    raw_stat.vel_f(0) = -index4/50.0*0.2;
+                    raw_stat.pos_f(0) = 2.0 - index4/50.0*0.2 * index4 /2.0/ LOOP_RATE;
+                }else if((index4>50)&&(index4<=100)){
+                raw_stat.vel_f(0) = -0.2;
+                    raw_stat.pos_f(0) = 2- (0.5+0.2*(index4/LOOP_RATE-5.0));
+            }
+            else if(index4 > 100 && index4 < 150){
+                raw_stat.vel_f(0) = -(0.2 - (index4-100)/50.0*0.2);
+                    raw_stat.pos_f(0) = (150-index4)/50.0*0.2 * (150-index2) /2.0/ LOOP_RATE;
+            }
+            else{
+                raw_stat.vel_f(0) = 0.0;
+                    raw_stat.pos_f(0) = 0.0;
+            }
+            break;
+        }*/
+
+
+
+
+
+
+
+
+
+        
         //raw_stat.vel_f(0) = raw_stat.vel_f(0)  * 10;
-	ROS_INFO("vset:%f",raw_stat.vel_f(0));
+    ROS_INFO("vset:x=%f y=%f",raw_stat.vel_f(0),raw_stat.vel_f(1));
+    ROS_INFO("pset:x=%f y=%f",raw_stat.pos_f(0),raw_stat.pos_f(1));
         //raw_stat.pos_f(0) = raw_stat.pos_f(0)  * 10;
-	*/
-	if(new_start)
+
+	
+    /*if(new_start)
 	{
-	  if(raw_stat.pos_b(0)!=0)
+      if(raw_stat.pos_b(1)!=0)
 	{
           raw_stat.pos_f = raw_stat.pos_b;
           new_start = false;
           pid_pos(raw_stat.pos_b,raw_stat.pos_f,contro.pos_sp);
           out.vel_sp = raw_stat.vel_f+contro.pos_sp;
-          pid_vel(raw_stat.vel_b,out.vel_sp,contro.vel_sp);
+          //pid_vel(raw_stat.vel_b,out.vel_sp,contro.vel_sp);
     }
-    }
-    else
+    }*/
+    //else
     {
         pid_pos(raw_stat.pos_b,raw_stat.pos_f,contro.pos_sp);
         out.vel_sp = raw_stat.vel_f+contro.pos_sp;
-        pid_vel(raw_stat.vel_b,out.vel_sp,contro.vel_sp);
+        pid_yaw(yaw_contro.yaw_actual,yaw_contro.yaw_set,out_yaw);
+
+        //ROS_INFO("vel_sp:x=%f y=%f",out.vel_sp(0),out.vel_sp(1));
+        //ROS_INFO("position:x=%f y=%f",raw_stat.pos_b(0),raw_stat.pos_b(1));
+        //pid_vel(raw_stat.vel_b,out.vel_sp,contro.vel_sp);
     }
 
-	//ROS_INFO("px_act:%f,py_act:%f,px_set:%f,py_set:%f",raw_stat.pos_b(0),raw_stat.pos_b(1),raw_stat.pos_f(0),raw_stat.pos_f(1));
-    //ROS_INFO("posafter_pid:x%fy%f",contro.pos_sp(0),contro.pos_sp(1));
-	//ROS_INFO("Vel,act,x:%f,y:%f,set,x:%f,y:%f",raw_stat.vel_b(0),raw_stat.vel_b(1),out.vel_sp(0),out.vel_sp(1));
-	//ROS_INFO("finalvel,x:%f,y:%f",contro.vel_sp(0),contro.vel_sp(1));
         
-        cmd.linear.x = contro.vel_sp(0)/10.0;
-        cmd.linear.y = contro.vel_sp(1)/10.0;
+        cmd.linear.x = out.vel_sp(0);
+        cmd.linear.y = out.vel_sp(1);
         cmd.linear.z = 0.0;
         cmd.angular.x = 0.0;
         cmd.angular.y = 0.0;
-        cmd.angular.z = 0.0;
-        //cmd.linear.x = 0.02;
-        //cmd.linear.y = 0.005;
+        cmd.angular.z = -out_yaw;//137100
+        cout << "yaw velocity" << -out_yaw << endl;
 
         cmd_pub.publish(cmd);
         ros::spinOnce();
